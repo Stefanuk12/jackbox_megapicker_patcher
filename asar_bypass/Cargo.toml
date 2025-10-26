@@ -1,0 +1,15 @@
+[package]
+name = "asar_bypass"
+description = "An automated patcher that bypassed Electron's ASAR integrity checks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+capstone = "0.13"
+capstone-sys = "0.17"
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11"
+goblin = "0.10"
+lightningscanner = { git = "https://github.com/localcc/lightningscanner-rs.git", rev = "90e0e5824fd57df36c3bcf1cc69c2b123b761948" }
+log = "0.4"
+thiserror = "2.0"

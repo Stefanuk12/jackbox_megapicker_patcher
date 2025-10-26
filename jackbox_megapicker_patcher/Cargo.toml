@@ -1,0 +1,16 @@
+[package]
+name = "jackbox_megapicker_patcher"
+description = "Patches the Jackbox Megapicker to support launching games installed in different directories, includes an ASAR integrity check bypass"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+asar = "0.3"
+asar_bypass = { path = "../asar_bypass" }
+clap = { version = "4.5", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+once_cell = "1.21"
+regex = "1.12"
+steamworks = "0.12"
+thiserror = "2.0"

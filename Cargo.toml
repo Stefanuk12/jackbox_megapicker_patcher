@@ -1,0 +1,6 @@
+[workspace]
+resolver = "3"
+members = [
+    "asar_bypass",
+    "jackbox_megapicker_patcher"
+]
