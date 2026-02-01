@@ -23,6 +23,13 @@ From here, you can input the games inside of `{MEGAPICKER_DIRECTORY}/games/{STEA
 > 5. Drag over the `main.js` file inside of `resources/main.js` inside of 7zip, you should be prompted to override
 > 6. Override the file and close 7zip
 
+## The code execution cannot proceed because steam_api64.dll was not found
+
+You must install the Steamworks SDK and place the `steam_api64.dll` in the same directory as the executable.
+
+1. Go to [https://partner.steamgames.com/downloads/list](Steamworks SDK Releases)
+2. You can find the `.dll` within the `./sdk/redistributable_bin/win64` folder inside of the `.zip` file
+
 ## Usage
 
 ```bash
