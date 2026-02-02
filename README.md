@@ -28,7 +28,9 @@ From here, you can input the games inside of `{MEGAPICKER_DIRECTORY}/games/{STEA
 You must install the Steamworks SDK and place the `steam_api64.dll` in the same directory as the executable.
 
 1. Go to [Steamworks SDK Releases](https://partner.steamgames.com/downloads/list)
-2. You can find the `.dll` within the `./sdk/redistributable_bin/win64` folder inside of the `.zip` file
+2. Press "Install latest SDK"
+3. Extract the downloaded `.zip` file.
+4. You can find the `.dll` within the `./sdk/redistributable_bin/win64` folder inside of the extracted folder
 
 ## Usage
 
