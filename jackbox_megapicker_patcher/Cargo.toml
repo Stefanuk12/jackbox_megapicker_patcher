@@ -1,7 +1,7 @@
 [package]
 name = "jackbox_megapicker_patcher"
 description = "Patches the Jackbox Megapicker to support launching games installed in different directories, includes an ASAR integrity check bypass"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
