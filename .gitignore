@@ -1,2 +1,4 @@
 /target
 steam_api64.dll
+/result
+.direnv
