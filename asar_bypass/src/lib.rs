@@ -12,6 +12,7 @@ pub use error::*;
 
 use crate::xrefs::XrefIterator;
 
+pub mod fuses;
 mod xrefs;
 
 /// Find the string in the image and return a file offset inside `data`.
@@ -265,9 +266,10 @@ fn apply_stub_patch(data: &mut [u8], func_start: usize, func_end: usize) -> Resu
     Ok(())
 }
 
-/// Given an `.exe` for an Electron app with ASAR integrity enabled,
-/// this function will NOP out the function responsible for validating the integrity: `ValidateIntegrityOrDie`
-pub fn patch(data: &mut [u8]) -> Result<()> {
+/// NOPs the function responsible for validating ASAR integrity,
+/// `ValidateIntegrityOrDie`, found by disassembling outwards from the first xref to
+/// one of its log strings.
+fn patch_validate_stub(data: &mut [u8]) -> Result<()> {
     let file_off = locate_string(data)?;
     let ref_va = find_first_xref_va(data, file_off)?.ok_or(Error::XrefNotFound)?;
 
@@ -282,6 +284,25 @@ pub fn patch(data: &mut [u8]) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Given an `.exe` for an Electron app with ASAR integrity enabled, this disables
+/// that validation so a modified `app.asar` still loads.
+///
+/// Flipping the `EnableEmbeddedAsarIntegrityValidation` fuse is the mechanism
+/// `@electron/fuses` itself uses, so it is preferred: one byte, no disassembly, and
+/// re-running it over an already-patched exe is a no-op. Megapicker 44.4.1 proved the
+/// stub alone insufficient — it NOPs a plausible-looking function, yet Electron still
+/// rejected the rewritten asar. The stub is kept only for builds with no fuse wire.
+pub fn patch(data: &mut [u8]) -> Result<()> {
+    match fuses::disable_asar_integrity(data) {
+        Ok(_) => Ok(()),
+        Err(Error::FuseSentinelNotFound) => {
+            info!("No fuse wire found; falling back to the ValidateIntegrityOrDie stub");
+            patch_validate_stub(data)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn patch_file<P: AsRef<Path>>(input_path: P, output_path: Option<P>) -> Result<()> {
