@@ -13,7 +13,9 @@ use steamworks::{AppId, Client};
 static REQUIRES_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?ms)(\w+?)\s*?=\s*?require\("(node:path|node:fs|child_process)"\)"#).unwrap());
 static ENTITLEMENTS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?ms)if\s*?\(!(\w+?)\.entitlements\s*?\|\|\s*?!(\w+?)\.products\s*?\|\|\s*?!(\w+?)\.storage\)\s*?return\s*?null;.*?const.*?];").unwrap());
 static INSTALLED_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)\[(\w+)\.steamId\]\s*?=\s*?\{\s*?isInstalled:\s*?(\w+?),\s*?installDir:\s*?(\w+?)\s*?\}").unwrap());
-static LAUNCH_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?ms)(\w+)\s*?=\s*?`steam://run/\$\{(\w+)\.data\.steamId}// -launchTo \$\{(\w+)\} -jbg\.config isBundle=false`;(.*?)(if\s*?\(await\s*?(\w+)\.)(.+?)!(\w+)\.user(.+?);").unwrap());
+// Megapicker 44.4 moved the `-launchTo …` suffix out of the template literal and into a helper
+// taking the game's `launchInfo`, so both shapes are accepted.
+static LAUNCH_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?ms)(?P<url>\w+)\s*?=\s*?`steam://run/\$\{(?P<game>\w+)\.data\.steamId}(?:// -launchTo \$\{(?P<target>\w+)\} -jbg\.config isBundle=false|\$\{\w+\((?P<info>\w+)\)})`;.*?(?P<tail>if\s*?\(await\s*?(?P<electron>\w+)\.).+?!(?P<user>\w+)\.user.+?;").unwrap());
 
 /// Patches the [Jackbox Megapicker](https://store.steampowered.com/app/2828500/The_Jackbox_Megapicker/) to support launching games installed in different directories, includes an ASAR integrity check bypass.
 #[derive(Parser)]
@@ -107,6 +109,10 @@ fn debug_crash_handler() -> &'static str {
     r#"try{var __jf=require("node:fs"),__jp=require("node:path"),__jl=__jp.join(process.resourcesPath||".","jbmp_crash.log");__jf.writeFileSync(__jl,"jbmp: handler installed\n");var __jw=function(t,e){try{__jf.appendFileSync(__jl,t+": "+String(e&&e.stack||e)+"\n")}catch(_){}};process.on("uncaughtException",function(e){__jw("EXC",e)});process.on("unhandledRejection",function(e){__jw("REJ",e)});}catch(_){}"#
 }
 
+/// Mirrors the megapicker's own `-launchTo` path munging (`/` becomes `\\` on Windows and `%2F`
+/// elsewhere). Games whose `launchInfo` carries no path get "", and are launched without the flag.
+const LAUNCH_TO_HELPER: &str = r#"function __jbmpLaunchTo(info){var p=info&&info.path?info.path:"";if(!p)return"";return process.platform==="win32"?p.replaceAll("/","\\\\"):p.replaceAll("/","%2F");}"#;
+
 /// Prelude that maps steam id to its path.
 fn build_injected_prelude(opts: &PatchOptions) -> Result<String> {
     let mut path_map = BTreeMap::new();
@@ -136,7 +142,8 @@ fn build_injected_prelude(opts: &PatchOptions) -> Result<String> {
              var k=String(steamId);\
              var e=Object.prototype.hasOwnProperty.call(__jbmpGameArgs,k)?__jbmpGameArgs[k]:[];\
              return __jbmpGlobalArgs.concat(e);\
-         }}\n"
+         }}\
+         {LAUNCH_TO_HELPER}\n"
     ))
 }
 
@@ -159,6 +166,11 @@ fn leading_directive_end(s: &str) -> Option<usize> {
 /// Returns the capture group at index `i` as a string slice.
 fn get_capture_str<'a>(caps: &'a Captures<'_>, i: usize) -> &'a str {
     caps.get(i).map(|x| x.as_str()).unwrap_or_default()
+}
+
+/// Returns the named capture group as a string slice.
+fn get_capture_name<'a>(caps: &'a Captures<'_>, name: &str) -> &'a str {
+    caps.name(name).map(|x| x.as_str()).unwrap_or_default()
 }
 
 /// Patches the `main.js` file to allow the launching of custom game directories and launch options.
@@ -207,17 +219,22 @@ fn patch_main_js(main: &mut String, opts: &PatchOptions) -> Result<()> {
 
     // Modify the launch behaviour to use local files
     let captures = LAUNCH_RE.captures_iter(main).next().ok_or(Error::LaunchMatch)?;
-    let url_var = get_capture_str(&captures, 1);
-    let game_var = get_capture_str(&captures, 2);
-    let target_var = get_capture_str(&captures, 3);
-    let electron_var = get_capture_str(&captures, 6);
-    let user_var = get_capture_str(&captures, 8);
-    let range = captures.get(5).unwrap().start()..captures.get_match().end();
+    let url_var = get_capture_name(&captures, "url");
+    let game_var = get_capture_name(&captures, "game");
+    let electron_var = get_capture_name(&captures, "electron");
+    let user_var = get_capture_name(&captures, "user");
+    let launch_to = match (captures.name("target"), captures.name("info")) {
+        (Some(target), _) => target.as_str().to_string(),
+        (None, Some(info)) => format!("__jbmpLaunchTo({})", info.as_str()),
+        (None, None) => return Err(Error::LaunchMatch),
+    };
+    let range = captures.name("tail").unwrap().start()..captures.get_match().end();
     main.replace_range(range, &format!(r#"
         if (!{user_var}.user) return console.warn("No user. Are you logged in?"), {url_var};
         let exePath = null;
         const gameDir = __jbmpResolveGameDir({game_var}.data.steamId);
         const __jbmpExtraArgs = __jbmpLaunchArgs({game_var}.data.steamId);
+        const launchTo = {launch_to};
         try {{
             const findExe = (dir) => {{
                 let list;
@@ -236,14 +253,14 @@ fn patch_main_js(main: &mut String, opts: &PatchOptions) -> Result<()> {
         }} catch (err) {{ }}
         // If we found an exe path, spawn it directly with arguments so Windows runs the app
         if (exePath && {node_fs}.existsSync(exePath)) {{
-            const args = ["-launchTo", {target_var}, "-jbg.config", "isBundle=false"].concat(__jbmpExtraArgs);
+            const args = (launchTo ? ["-launchTo", launchTo] : []).concat(["-jbg.config", "isBundle=false"], __jbmpExtraArgs);
 
             const exePathResolved = {node_path}.resolve(exePath);
             const child = {child_process}.execFile(exePathResolved, args, {{ detached: true, stdio: "ignore", cwd: {node_path}.resolve(gameDir) }});
         }} else {{
             // No exe found; launch via Steam so it handles the app (overlay, cloud, etc.)
-            {url_var} = `steam://run/${{{game_var}.data.steamId}}// -launchTo ${{{target_var}}} -jbg.config isBundle=false` + (__jbmpExtraArgs.length ? " " + __jbmpExtraArgs.join(" ") : "");
-            await {electron_var}.shell.openExternal({url_var});
+            const steamUrl = `steam://run/${{{game_var}.data.steamId}}` + (launchTo ? `// -launchTo ${{launchTo}} -jbg.config isBundle=false` : "") + (__jbmpExtraArgs.length ? " " + __jbmpExtraArgs.join(" ") : "");
+            await {electron_var}.shell.openExternal(steamUrl);
         }}
     "#));
     debug!("Patched launch behaviour");
@@ -514,6 +531,36 @@ async function launch(game, target, electron, user) {
 }
 "#;
 
+    /// The same stand-in with the launch shape megapicker 44.4 introduced: the
+    /// `-launchTo …` suffix is built by a helper taking the game's `launchInfo`.
+    const SAMPLE_44: &str = r#""use strict";
+const path = require("node:path");
+const fs = require("node:fs");
+const cp = require("child_process");
+
+function checkEntitlements(user) {
+  if (!user.entitlements || !user.products || !user.storage) return null;
+  const owned = [
+    ...user.entitlements.appsOwned
+  ];
+  return owned;
+}
+
+function markInstalled(game, state, gameDir) {
+  state[game.steamId] = { isInstalled: true, installDir: gameDir };
+}
+
+function suffix(info) {
+  return info.path ? `// -launchTo ${info.path} -jbg.config isBundle=false` : "";
+}
+
+async function launch(game, info, electron, user) {
+  const url = `steam://run/${game.data.steamId}${suffix(info)}`;
+  if (await electron.shell.openExternal(url), !user.user) return console.warn("No user. Are you logged in?"), url;
+  return null;
+}
+"#;
+
     #[test]
     fn patches_all_sites_and_injects_resolver() {
         let mut main = SAMPLE.to_string();
@@ -535,7 +582,10 @@ async function launch(game, target, electron, user) {
 
         // Launch args are resolved once and appended to both launch paths.
         assert!(main.contains("const __jbmpExtraArgs = __jbmpLaunchArgs(game.data.steamId);"));
-        assert!(main.contains(r#"["-launchTo", target, "-jbg.config", "isBundle=false"].concat(__jbmpExtraArgs)"#));
+        assert!(main.contains(r#"(launchTo ? ["-launchTo", launchTo] : []).concat(["-jbg.config", "isBundle=false"], __jbmpExtraArgs)"#));
+
+        // The pre-44.4 shape hands the already-munged path variable straight through.
+        assert!(main.contains("const launchTo = target;"));
 
         // The hardcoded `./games/${...}` default now lives only in the resolver.
         assert_eq!(main.matches("`./games/${").count(), 1);
@@ -544,6 +594,66 @@ async function launch(game, target, electron, user) {
         if let Ok(p) = std::env::var("JBMP_TEST_OUT") {
             std::fs::write(p, &main).unwrap();
         }
+    }
+
+    #[test]
+    fn patches_the_44_4_launch_shape() {
+        let mut main = SAMPLE_44.to_string();
+        patch_main_js(&mut main, &opts_with_launch_args()).expect("patch should succeed");
+
+        // The `-launchTo` path now comes from the game's launchInfo object.
+        assert!(main.contains("const launchTo = __jbmpLaunchTo(info);"));
+        assert!(main.contains("const gameDir = __jbmpResolveGameDir(game.data.steamId);"));
+
+        // The steam:// fallback is rebuilt into its own binding: 44.4 declares the
+        // original url with `const`, so assigning back to it would throw.
+        assert!(main.contains("const steamUrl = `steam://run/${game.data.steamId}`"));
+        assert!(main.contains("openExternal(steamUrl)"));
+
+        // Games whose launchInfo has no path are launched without the flag.
+        assert!(main.contains(r#"(launchTo ? ["-launchTo", launchTo] : [])"#));
+    }
+
+    /// `__jbmpLaunchTo` must reproduce the megapicker's own path munging and
+    /// tolerate the pathless `launchInfo` entries newer packs ship.
+    #[test]
+    fn launch_to_helper_matches_megapicker_munging() {
+        if !node_available() {
+            eprintln!("skipping launch_to_helper_matches_megapicker_munging: `node` not found on PATH");
+            return;
+        }
+
+        let mut main = SAMPLE_44.to_string();
+        patch_main_js(&mut main, &PatchOptions::default()).expect("patch should succeed");
+
+        let path = std::env::temp_dir().join(format!("jbmp_launchto_{}.js", std::process::id()));
+        std::fs::write(&path, &main).expect("write temp file");
+
+        let eval = std::process::Command::new("node")
+            .arg("-e")
+            .arg(
+                "var src=require('fs').readFileSync(process.argv[1], 'utf8');\
+                 eval(src + ';globalThis.__T=__jbmpLaunchTo;');\
+                 var T=globalThis.__T, sep=process.platform===\"win32\"?\"\\\\\\\\\":\"%2F\";\
+                 process.stdout.write(JSON.stringify([\
+                     T({path:'games/Quiplash3/Quiplash3.swf'}), T({}), T(null), sep]));",
+            )
+            .arg(&path)
+            .output()
+            .expect("run node -e");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            eval.status.success(),
+            "evaluating patched main.js failed:\n{}",
+            String::from_utf8_lossy(&eval.stderr)
+        );
+
+        let out: Vec<String> = serde_json::from_slice(&eval.stdout).expect("parse node output");
+        let sep = &out[3];
+        assert_eq!(out[0], format!("games{sep}Quiplash3{sep}Quiplash3.swf"));
+        assert_eq!(out[1], ""); // no path -> no -launchTo
+        assert_eq!(out[2], ""); // no launchInfo at all
     }
 
     #[test]
